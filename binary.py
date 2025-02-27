@@ -23,7 +23,14 @@ class BinaryFile:
 
         self.file = file
 
-    def get_size(self) -> int:
+    def _get_current_pos(self) -> int:
+        """
+        Gets the current position in the file.
+        :return: Current position in the file.
+        """
+        return self.file.tell()
+
+    def _get_size(self) -> int:
         """
         Gets the size of the file in bytes.
         :return: Size (integer) of file in bytes.
@@ -57,7 +64,7 @@ class BinaryFile:
                     if pos > 0 start from beginning of file
         :raises ValueError: if pos out of bounds
         """
-        size = self.get_size()
+        size = self._get_size()
         if not isinstance(pos, int):
             raise TypeError("Pos must be integer")
         
@@ -157,7 +164,7 @@ class BinaryFile:
         
         # check if there enough bytes to read size bytes
         curr_pos = self.file.tell()
-        file_size = self.get_size()
+        file_size = self._get_size()
         if curr_pos+size > file_size:
             raise ValueError(f"Could not read {size} bytes, out of bounds.")
 
