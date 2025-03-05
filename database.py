@@ -22,23 +22,6 @@ class Database:
             :return: list of table names
         """
         return list(self.tables.keys())
-    
-    def _write_header(self, binary_file: BinaryFile, table_name: str, fields: list[tuple[str, FieldType]]) -> None:
-        """
-            Writes the header section:
-            - Magic constant "ULDB" (4 bytes)
-            - Number of fields (4 bytes)
-            - Table signature (variable size)
-        """
-        binary_file.write_string("ULDB")
-        binary_file.write_integer(len(fields), 4)
-        
-        # Write signature for each field
-        for field_name, field_type in fields:
-            # write field type (1 byte)
-            binary_file.write_integer(field_type.value, 1)
-            # write field name (ULDB format)
-            binary_file.write_string(field_name)
 
     def _initialize_string_buffer(self, binary_file: BinaryFile, offset: int) -> None:
         """
@@ -66,7 +49,24 @@ class Database:
         # three -1 pointers
         for _ in range(3):  
             binary_file.write_integer(-1, 4)
+    
+    def _write_header_first_section(self, binary_file: BinaryFile, fields: list[tuple[str, FieldType]]) -> None:
+        """
+            Writes the first section of the header:
+            - Magic constant "ULDB" (4 bytes)
+            - Number of fields (4 bytes)
+            - Table signature (variable size)
+        """
+        binary_file.write_string("ULDB")
+        binary_file.write_integer(len(fields), 4)
         
+        # Write signature for each field
+        for field_name, field_type in fields:
+            # write field type (1 byte)
+            binary_file.write_integer(field_type.value, 1)
+            # write field name (ULDB format)
+            binary_file.write_string(field_name)        
+
     def _write_offsets(self, binary_file: BinaryFile, string_buffer_offset: int, entry_buffer_offset: int) -> None:
         """
             Writes the offset section:
@@ -130,7 +130,7 @@ class Database:
             binary_file = BinaryFile(f)
             
             # Write header
-            self._write_header(binary_file, table_name, [field for field in fields])
+            self._write_header_first_section(binary_file, [field for field in fields])
             
             # Calculate offsets
             current_pos = binary_file._get_current_pos()
