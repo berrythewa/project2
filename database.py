@@ -169,6 +169,104 @@ class Database:
             raise ValueError(f"Table {table_name} does not exist")
         return self.tables[table_name]
 
+    
+    def _parse_header(self, binary_file: BinaryFile) -> dict:
+        """
+            Parses the header of the table.
+            :param binary_file: binary file
+            :return: dict of offsets
+        """
+        # go to start of file
+        binary_file.goto(0)
+        # read magic constant
+        magic_c = binary_file.read_string(4)
+        if magic_c != "ULDB":
+            raise ValueError("Invalid magic constant")
+        # read number of fields
+        nfields = binary_file.read_integer(4)
+        # read table signature
+        table_signature = []
+        for _ in range(nfields):
+            field_type = binary_file.read_integer(1)
+            field_name = binary_file.read_string()
+            table_signature.append((field_name, FieldType(field_type)))
+        # read offsets
+        header = {}
+        header['string_buffer_offset'] = binary_file.read_integer(4)
+        header['first_available_position'] = binary_file.read_integer(4)
+        header['first_entry_offset'] = binary_file.read_integer(4)
+        header['signature'] = table_signature
+        header['nfields'] = nfields
+        header['magic_c'] = magic_c
+        return header
+
+    def _parse_mini_header(self, binary_file: BinaryFile, header: dict) -> dict:
+        """
+            Parses the mini header of the table.
+            :param binary_file: binary file
+            :param header: header of the table
+            :return: dict of mini header
+        """
+        # go to entry buffer  
+        binary_file.goto(header['first_entry_offset'])
+        mini_header = {}
+        # read last used ID
+        mini_header['last_used_id'] = binary_file.read_integer(4)
+        # read number of entries
+        mini_header['nentries'] = binary_file.read_integer(4)
+        # read first entry pointer
+        mini_header['first_entry_pointer'] = binary_file.read_integer(4)
+        # read last entry pointer
+        mini_header['last_entry_pointer'] = binary_file.read_integer(4)
+        # read reserved pointer
+        mini_header['reserved_pointer'] = binary_file.read_integer(4)
+        return mini_header
+    
+    def _get_table(self, table_name: str) -> tuple[BinaryFile, dict]:
+        """
+            Returns the table of the given name.
+            :param table_name: name of the table
+            :return: tuple of (BinaryFile, {offsets})
+        """
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # read offsets
+            return binary_file, self._parse_header(binary_file)
+
+    # DB OPERATIONS
+    def add_entry(self, table_name: str, entry: Entry) -> None
+        """
+            Adds an entry to the table of the given name.
+            :param table_name: name of the table
+            :param entry: dict[str, Field] to be added to the table
+            :raises ValueError: if table name does not exist
+            :raises TypeError: if entry is not a dictionary
+            :raises ValueError: if entry fields are not compatible with table signature
+        """
+        # check table name
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} does not exist")
+        # check entry
+        if not isinstance(entry, dict):
+            raise TypeError(f"Entry must be a dictionary, got {type(entry)}")
+        # check entry fields
+        for fieldname, fieldvalue in entry.items():
+            # check field name
+            if not isinstance(fieldname, str):
+                raise TypeError(f"Field name must be a string, got {type(fieldname)}")
+            # check field exists in signature
+            if fieldname not in self.tables[table_name]:
+                raise ValueError(f"Field {fieldname} does not exist in table {table_name}")
+            # check field value
+            if not isinstance(fieldvalue, Field):
+                raise TypeError(f"Field value must be a Field, got {type(fieldvalue)}")
+
+
+
+
 if __name__ == "__main__":
     db = Database('programme')
     db.create_table(
