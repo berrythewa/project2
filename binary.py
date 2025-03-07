@@ -23,6 +23,13 @@ class BinaryFile:
 
         self.file = file
 
+    def __tell__(self) -> int:
+        """
+        Gets the current position in the file.
+        :return: Current position in the file.
+        """
+        return self.file.tell()
+
     def _get_current_pos(self) -> int:
         """
         Gets the current position in the file.
