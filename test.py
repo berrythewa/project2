@@ -145,7 +145,7 @@ def test_get_signature_non_existing_table():
     with pytest.raises(ValueError):
         db.get_table_signature('COURS')
 
-def create_table_twice():
+def test_create_table_twice():
     db = get_db('data')
     db.create_table('table')
     with pytest.raises(ValueError):
