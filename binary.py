@@ -104,28 +104,15 @@ class BinaryFile:
         # validate the range of the integer
         min_value = -(2**(8*size-1)) #minimum value for two's complement
         max_value = 2 ** (8*size-1) - 1 #maximum value for two's complement
+        bytes_written = 0
         if not (min_value<=n<=max_value):
             raise ValueError(f"Integer {n} cannot be represented in {size} bytes.")
-        
-        # Save initial position in case we need to restore on error
-        initial_pos = self.file.tell()
-        bytes_written = 0
-        
         try:
             # convert integer to bytes in little-endian format
             encoded_bytes = n.to_bytes(size, byteorder='little', signed=True)
-            
             # write the bytes to the file
             bytes_written = self.file.write(encoded_bytes)
-            if bytes_written != size:
-                raise IOError(f"Wrong number of bytes {bytes_written} written whilst size is {size}.")
-            
         except Exception as e:
-            # Restore position on any error
-            try:
-                self.file.seek(initial_pos)
-            except Exception as seek_error:
-                print(f"Error restoring position: {seek_error}")
             raise IOError(f"Failed to write integer: {str(e)}")
         
         return bytes_written
@@ -225,36 +212,18 @@ class BinaryFile:
         """
         if not isinstance(s, str):
             raise TypeError("Input must be a string")
-
         # Convert string to UTF-8 bytes
         utf8_bytes = s.encode("utf-8")
         utf8_length = len(utf8_bytes)
-        
         # Validate ULDB string length constraint (0 to 32767 bytes)
         if utf8_length > 32767:  # 2^15 - 1
             raise ValueError(f"UTF-8 encoded string length ({utf8_length} bytes) exceeds ULDB maximum of 32,767 bytes")
-        
         # Write 2-byte length prefix - let its errors propagate
-        prefix_bytes_written = self.write_integer(utf8_length, 2)
-        
-        # Save position after prefix for potential restoration
-        after_prefix_pos = self.file.tell()
-        bytes_written = prefix_bytes_written
-        
+        bytes_written = self.write_integer(utf8_length, 2)
         try:
             # Write UTF-8 encoded string
-            string_bytes_written = self.file.write(utf8_bytes)
-            if string_bytes_written != utf8_length:
-                raise IOError(f"Failed to write complete string: wrote {string_bytes_written} of {utf8_length} bytes")
-            
-            bytes_written += string_bytes_written
-            
+            bytes_written += self.file.write(utf8_bytes)
         except Exception as e:
-            # Restore position to after prefix on string content error
-            try:
-                self.file.seek(after_prefix_pos)
-            except Exception as seek_error:
-                print(f"Error restoring position: {seek_error}")
             raise IOError(f"Failed to write string content: {str(e)}")
         
         return bytes_written
