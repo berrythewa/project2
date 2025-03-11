@@ -37,7 +37,7 @@ class BinaryFile:
         """
         return self.file.tell()
 
-    def _get_size(self) -> int:
+    def get_size(self) -> int:
         """
         Gets the size of the file in bytes.
         :return: Size (integer) of file in bytes.
@@ -46,11 +46,10 @@ class BinaryFile:
         # save current position
         curr_pos = self.file.tell()
         size = 0
-        
         try:
             # move to end of file
             self.file.seek(0, 2)  # 2 means seek from end
-            size = self.file.tell()
+            size += self.file.tell()
         except Exception as e:
             print(f"Error getting file size: {e}")
             raise IOError(f"Failed to get file size: {str(e)}")
@@ -60,7 +59,6 @@ class BinaryFile:
                 self.file.seek(curr_pos, 0)  # 0 means seek from start
             except Exception as e:
                 print(f"Error restoring position: {e}")
-        
         return size
 
     def goto(self, pos: int) -> None:
@@ -71,18 +69,15 @@ class BinaryFile:
                     if pos > 0 start from beginning of file
         :raises ValueError: if pos out of bounds
         """
-        size = self._get_size()
+        size = self.get_size()
         if not isinstance(pos, int):
             raise TypeError("Pos must be integer")
-        
         # for negative positions, convert to offset from end
         if pos < 0:
             pos = size + pos
-            
         # check bounds
         if pos > size or pos < 0:
             raise ValueError(f"Position {pos} out of bounds.")
-        
         # safely seek to pos
         self.file.seek(pos, 0)
 
@@ -112,9 +107,10 @@ class BinaryFile:
             encoded_bytes = n.to_bytes(size, byteorder='little', signed=True)
             # write the bytes to the file
             bytes_written = self.file.write(encoded_bytes)
+            if bytes_written != len(encoded_bytes):
+                raise IOError(f"Failed to write all bytes: expected {len(encoded_bytes)}, wrote {bytes_written}")
         except Exception as e:
             raise IOError(f"Failed to write integer: {str(e)}")
-        
         return bytes_written
 
     def write_integer_to(self, n: int, size: int, pos: int) -> int:
@@ -129,7 +125,6 @@ class BinaryFile:
         # save current position
         curr_pos = self.file.tell()
         bytes_written = 0
-        
         try:
             self.goto(pos)  # Let ValueError from invalid position propagate
             bytes_written = self.write_integer(n, size)  # Let ValueError and IOError propagate
@@ -141,7 +136,6 @@ class BinaryFile:
                 print(f"Error restoring position: {e}")
             bytes_written = 0  # Nothing was written if any error occurred
             raise  # Re-raise the original error
-        
         return bytes_written
 
     def read_integer(self, size: int) -> int:
@@ -155,19 +149,16 @@ class BinaryFile:
         # check size 
         if size not in (1,2,4):
             raise ValueError("Size must be 1,2 or 4 bytes")
-        
         # check if there enough bytes to read size bytes
         curr_pos = self.file.tell()
-        file_size = self._get_size()
+        file_size = self.get_size()
         if curr_pos+size > file_size:
             raise ValueError(f"Could not read {size} bytes, out of bounds.")
-
         # read bytes and convert
         read_bytes = self.file.read(size)
         # extra cautiousness check for out of bounds error
         if len(read_bytes) != size:
             raise EOFError(f"Unexpected end of file while reading {size} bytes at pos {curr_pos}.")
-
         return int.from_bytes(read_bytes, byteorder='little', signed=True)
 
     def read_integer_from(self, size: int, pos: int) -> int:
@@ -220,12 +211,15 @@ class BinaryFile:
             raise ValueError(f"UTF-8 encoded string length ({utf8_length} bytes) exceeds ULDB maximum of 32,767 bytes")
         # Write 2-byte length prefix - let its errors propagate
         bytes_written = self.write_integer(utf8_length, 2)
+        if bytes_written != 2:
+            raise IOError("Failed to write string length prefix")
         try:
             # Write UTF-8 encoded string
             bytes_written += self.file.write(utf8_bytes)
+            if bytes_written != len(utf8_bytes) + 2: # 2 bytes for the length prefix
+                raise IOError(f"Failed to write all bytes: expected {len(utf8_bytes)}, wrote {bytes_written}")
         except Exception as e:
             raise IOError(f"Failed to write string content: {str(e)}")
-        
         return bytes_written
 
     def write_string_to(self, s: str, pos: int) -> int:
@@ -239,14 +233,13 @@ class BinaryFile:
         # save current position
         curr_pos = self.file.tell()
         bytes_written = 0
-        
         try:
             # goto pos
             self.goto(pos)
-            
             # write and retrieve number of bytes written
             bytes_written = self.write_string(s)
-            
+            if bytes_written != len(s):
+                raise IOError(f"Failed to write all bytes: expected {len(s)}, wrote {bytes_written}")
         except Exception as e:
             # Only restore position on error
             try:
@@ -257,7 +250,6 @@ class BinaryFile:
             bytes_written = 0
             print(f"Error writing string: {e}")
             raise
-        
         return bytes_written
 
     def read_string(self) -> str:
@@ -277,11 +269,9 @@ class BinaryFile:
             prefix = self.read_integer(2)  # Read 2-byte signed integer
         except EOFError:
             raise EOFError("Unable to read string length prefix")
-        
         # According to ULDB format, string length must be between 0 and 32767 (2^15 - 1)
         if prefix < 0 or prefix > 32767:
             raise ValueError(f"Invalid string length prefix: {prefix}. Must be between 0 and 32767.")
-        
         # read the string bytes
         try:
             string_bytes = self.file.read(prefix)
@@ -306,7 +296,6 @@ class BinaryFile:
         # save current position
         curr_pos = self.file.tell()
         return_string = ''
-        
         try:
             self.goto(pos)  # Let ValueError from invalid position propagate
             return_string = self.read_string()  # Let all errors propagate
@@ -317,5 +306,4 @@ class BinaryFile:
             except Exception as e:
                 print(f"Error restoring position: {e}")
             raise  # Re-raise the original error
-        
         return return_string
