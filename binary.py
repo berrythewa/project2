@@ -13,14 +13,12 @@ class BinaryFile:
         required_methods = ['read', 'write', 'seek', 'tell']
         if not all(hasattr(file, method) for method in required_methods):
             raise TypeError("File must be a binary file object with read/write/seek/tell methods.")
-        
         # Check file mode
         mode = getattr(file, 'mode', '')
         if 'b' not in mode:
             raise ValueError("File must be opened in binary mode ('b').")
         if '+' not in mode and not ('r' in mode and 'w' in mode):
             raise ValueError("Opening mode should support both write and read (e.g., 'rb+', 'wb+').")
-
         self.file = file
 
     def __tell__(self) -> int:
@@ -95,7 +93,6 @@ class BinaryFile:
         # check size 
         if size not in (1,2,4):
             raise ValueError("Size must be 1,2 or 4 bytes")
-        
         # validate the range of the integer
         min_value = -(2**(8*size-1)) #minimum value for two's complement
         max_value = 2 ** (8*size-1) - 1 #maximum value for two's complement
@@ -174,7 +171,6 @@ class BinaryFile:
         # save current position
         curr_pos = self.file.tell()
         read_integer = 0
-        
         try:
             self.goto(pos)  # Let ValueError from invalid position propagate
             read_integer = self.read_integer(size)  # Let ValueError and EOFError propagate
@@ -185,7 +181,6 @@ class BinaryFile:
             except Exception as e:
                 print(f"Error restoring position: {e}")
             raise  # Re-raise the original error
-        
         return read_integer
 
     def write_string(self, s: str) -> int:
