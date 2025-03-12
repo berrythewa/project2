@@ -23,6 +23,7 @@ class Database:
         self.indexes_built = False
         self.indexes_built_tables = []
         self.open_files: dict[str, BinaryFile] = {}
+        self.string_lookup_built = False
         self.string_lookup: dict[str, int] = {}
    
 
@@ -340,7 +341,7 @@ class Database:
                 
                 # update offset to next string
                 start += read_len + 2
-
+            self.string_lookup_built = True
         except Exception as e:
             print(f"Error while building string lookup: {e}")
             raise
@@ -358,6 +359,8 @@ class Database:
         # initialize index for this table
         if table_name not in self.indexes:
             self.indexes[table_name] = {}
+        for field in self.tables[table_name]:
+            self.indexes[table_name][field] = {}
         # read header and entry header
         binary_file.goto(0)
         header = self._parse_header(binary_file)
@@ -456,6 +459,8 @@ if __name__ == "__main__":
 
     if db.indexes_built:
         print("Indexes built:", db.indexes)
+    if db.string_lookup_built:
+        print("String lookup built:", db.string_lookup)
 
     # Clean up
     # db.delete_table('cours')
