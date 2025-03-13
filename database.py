@@ -7,8 +7,11 @@ class FieldType(IntEnum):
     INTEGER = 1
     STRING = 2
 
+# field value type alias
+Field = int | str
+
 # Entry type alias
-Entry = dict[str, int | str]
+Entry = dict[str, Field]
 
 # type alias for table signature
 TableSignature = list[tuple[str, FieldType]]
@@ -25,19 +28,20 @@ class Database:
         self.indexes: dict[str, dict[str, dict[int | str, list[int]]]] = {}
         self.indexes_built = False
         self.indexes_built_tables = []
-        self.open_files: dict[str, BinaryFile] = {}
         self.string_lookup_built = False
         self.string_lookup: dict[str, int] = {}
+        # TODO: consider if necessary to keep open files
+        # self.open_files: dict[str, BinaryFile] = {}
    
     # HELPER FUNCTIONS
-    def _initialize_string_buffer(self, binary_file: BinaryFile, offset: int) -> None:
+    def _initialize_string_buffer(self, binary_file: BinaryFile, offset: int, string_buffer_size: int = 16) -> None:
         """
             Initializes the string buffer:
             - Initializes a 16-byte buffer with zeros
         """
         binary_file.goto(offset)
         # initialize 16 bytes with zeros
-        for _ in range(16):
+        for _ in range(string_buffer_size):
             binary_file.write_integer(0, 1)
         binary_file.goto(0)
 
@@ -64,7 +68,7 @@ class Database:
         # go to start of file
         binary_file.goto(0)
         
-    def _write_header(self, binary_file: BinaryFile, fields: list[tuple[str, FieldType]]) -> tuple[int, int]:
+    def _write_header(self, binary_file: BinaryFile, fields: list[tuple[str, FieldType]], string_buffer_offset: int = 64, entry_buffer_offset: int = 80) -> tuple[int, int]:
         """
             Writes the complete header section:
             - Magic constant "ULDB" (4 bytes)
@@ -89,9 +93,6 @@ class Database:
             binary_file.write_integer(field_type.value, 1)
             # field name - length-prefixed UTF-8 string
             binary_file.write_string(field_name)
-        # fixed offsets for string buffer and entry buffer
-        string_buffer_offset = 64
-        entry_buffer_offset = 80
         # string buffer offset
         binary_file.write_integer(string_buffer_offset, 4)
         # first available position in string buffer
@@ -205,8 +206,9 @@ class Database:
         # initialize index for this table
         if table_name not in self.indexes:
             self.indexes[table_name] = {}
-        for field in self.tables[table_name]:
-            self.indexes[table_name][field] = {}
+        # initialize field-specific indexes using field names
+        for field_name, field_type in self.tables[table_name]:
+            self.indexes[table_name][field_name] = {}
         # read header and entry header
         binary_file.goto(0)
         header = self._parse_header(binary_file)
@@ -232,6 +234,13 @@ class Database:
                 entry_fields[field_name] = value
             # add entry to index
             self.indexes[table_name][entry_id] = entry_fields
+            
+            # Build field-specific indexes for this entry
+            for field_name, value in entry_fields.items():
+                if value not in self.indexes[table_name][field_name]:
+                    self.indexes[table_name][field_name][value] = []
+                self.indexes[table_name][field_name][value].append(entry_id)
+                
             # go to next entry
             current_pos = binary_file.read_integer(4)  # read next pointer
         # update indexes_built_tables
@@ -260,11 +269,11 @@ class Database:
             if fieldname not in [field[0] for field in self.tables[table_name]]:
                 raise ValueError(f"Field {fieldname} does not exist in table {table_name}")
             # check field value
-            if not isinstance(fieldvalue, int | str):
+            if not isinstance(fieldvalue, Field):
                 raise TypeError(f"Field value must be an int or str, got {type(fieldvalue)}")
         return True
     
-    def _add_string_to_buffer(self, binary_file: BinaryFile, string: str, table_name: str) -> int:
+    def _add_string_to_buffer(self, binary_file: BinaryFile, string: str, table_name: str) -> tuple[int, dict, BinaryFile]:
         """
             Adds a string to the string buffer.
             If the string already exists in the buffer, returns its position.
@@ -291,7 +300,10 @@ class Database:
         available_space = header['entry_buffer_offset'] - header['string_buffer_first_available_position']    
         if required_space > available_space:
             # not enough space -> expand the string buffer
-            header, binary_file = self._expand_string_buffer(binary_file, header, table_name)
+            header, binary_file = self._expand_string_buffer(binary_file, header, 
+                self._parse_entry_header(binary_file, header), 
+                table_name
+            )
             # check expansion worked
             available_space = header['entry_buffer_offset'] - header['string_buffer_first_available_position']
             # if still not enough space
@@ -322,9 +334,9 @@ class Database:
         self.string_lookup[string] = string_pos
         # restore original position
         binary_file.goto(current_pos)
-        return string_pos
+        return string_pos, header, binary_file
 
-    def _expand_string_buffer(self, binary_file: BinaryFile, header: dict, table_name: str) -> tuple[dict, BinaryFile]:
+    def _expand_string_buffer(self, binary_file: BinaryFile, header: dict, entry_header: dict, table_name: str) -> tuple[dict, BinaryFile]:
         """
             Expands the string buffer to double its current size.
             Uses the table index to rebuild the file instead of reading entries directly.
@@ -334,37 +346,38 @@ class Database:
             :param table_name: name of the table
             :return: updated header
         """
+        print("\n=== Starting String Buffer Expansion ===")
+        print(f"Original header: {header}")
+        
         # current and new size
         curr_size = header['string_buffer_first_available_position'] - header['string_buffer_offset']
         if curr_size <= 0:
             curr_size = 16
         # TODO: come up with a better way to do this
         new_size = curr_size * 4 # arbitrary size (always a power of 2)
+        print(f"Current size: {curr_size}, New size: {new_size}")
+        
         # build index if not built
         if table_name not in self.indexes_built_tables:
             self._build_table_index(binary_file, table_name)
+            
         # create temporary file
         temp_file_path = f"{self.name}/temp_{table_name}.table"
+        new_string_buffer_offset = header['string_buffer_offset']
+        new_entry_buffer_offset = new_string_buffer_offset + new_size
+        print(f"New offsets - String buffer: {new_string_buffer_offset}, Entry buffer: {new_entry_buffer_offset}")
+        
         with open(temp_file_path, "wb+") as temp_f:
-            temp_binary = BinaryFile(temp_f)            
-            # copy header to temp file and update offsets later
-            binary_file.goto(0)
-            for i in range(header['string_buffer_offset']):
-                try:
-                    byte_val = binary_file.read_integer(1)
-                    temp_binary.write_integer(byte_val, 1)
-                except Exception as e:
-                    raise IOError(f"Error copying header byte {i}: {e}")
-            # create new string buffer with expanded size
-            new_string_buffer_offset = header['string_buffer_offset']
-            new_entry_buffer_offset = new_string_buffer_offset + new_size
-            # initialize the string buffer area with zeros
-            temp_binary.goto(new_string_buffer_offset)
-            for _ in range(new_size):
-                temp_binary.write_integer(0, 1)
-            # write at least 1 byte to be able to jump to entry buffer
-            temp_binary.goto(new_entry_buffer_offset)
-            temp_binary.write_integer(0, 1)
+            temp_binary = BinaryFile(temp_f)
+            print("\nWriting header to temp file...")
+            # write magic constant
+            self._write_header(temp_binary, self.tables[table_name], new_string_buffer_offset, new_entry_buffer_offset)
+            
+            print("\nInitializing buffers...")
+            self._initialize_string_buffer(temp_binary, new_string_buffer_offset, new_size)
+            self._initialize_entry_buffer(temp_binary, new_entry_buffer_offset)
+            
+            print("\nCopying strings...")
             # map of old string positions to new positions
             string_position_map = {}
             current_pos = header['string_buffer_offset']
@@ -394,142 +407,131 @@ class Database:
                             for j in range(i, str_len):
                                 temp_binary.write_integer(0, 1)
                             break
-                    # TODO: remove this
-                    # for debugging, try to read the string
-                    try:
-                        binary_file.goto(current_pos)
-                        string = binary_file.read_string()
-                    except Exception as e:
-                        raise IOError(f"Error reading string at pos {current_pos}: {e}")
                     # update positions
                     current_pos += 2 + str_len  # 2 bytes for length + string bytes
                     new_pos += 2 + str_len
                 except Exception as e:
                     raise IOError(f"Error processing string at pos {current_pos}: {e}")
-            # update first available position in string buffer
-            new_first_available_position = new_pos
-            # ensure new_first_available_position is not greater than new_entry_buffer_offset
-            if new_first_available_position > new_entry_buffer_offset:
-                new_first_available_position = new_string_buffer_offset + 16  # reset to initial position + 16 bytes
-            # get entry header information
-            try:
-                entry_header = self._parse_entry_header(binary_file, header)
-            except Exception as e:
-                raise IOError(f"Error reading entry header: {e}")
-            # create a default entry header
-                entry_header = {
-                    'last_used_id': 0,
-                    'nentries': 0,
-                    'first_entry_pointer': -1,
-                    'last_entry_pointer': -1,
-                    'reserved_pointer': -1
-                }
-            # get all entries from the index, sorted by ID
-            entries = []
-            for entry_id, entry_data in self.indexes[table_name].items():
-                if isinstance(entry_id, int):  # skip field-specific indexes
-                    entries.append((entry_id, entry_data))
-            # sort entries by ID to maintain original order
-            entries.sort(key=lambda x: x[0])
-            # calculate entry size: ID + fields + prev/next pointers
-            entry_size = 4 + len(header['signature']) * 4 + 8  
-            # initialize temp file pointers
-            prev_entry_pos = -1
-            first_entry_pos = -1
-            last_entry_pos = -1
-            # write entry buffer header first
-            temp_binary.goto(new_entry_buffer_offset)
-            temp_binary.write_integer(entry_header['last_used_id'], 4)  # last used ID
-            temp_binary.write_integer(len(entries), 4)  # number of entries
-            # prep pointers
-            first_entry_pointer_pos = temp_binary.file.tell()
-            temp_binary.write_integer(-1, 4)  # first entry pointer (placeholder)
-            last_entry_pointer_pos = temp_binary.file.tell()
-            temp_binary.write_integer(-1, 4)  # last entry pointer (placeholder)
-            temp_binary.write_integer(entry_header['reserved_pointer'], 4)  # reserved pointer
-            # write entries
-            for i, (entry_id, entry_data) in enumerate(entries):
-                try:
-                    # calculate new position
-                    new_entry_pos = new_entry_buffer_offset + 20 + i * entry_size
-                    # save first and last entry positions
-                    if i == 0:
-                        first_entry_pos = new_entry_pos
-                    last_entry_pos = new_entry_pos
-                    # write entry ID and fields
-                    temp_binary.goto(new_entry_pos)
-                    temp_binary.write_integer(entry_id, 4)
-                    for field_name, field_type in header['signature']:
-                        if field_type == FieldType.INTEGER:
-                            temp_binary.write_integer(entry_data[field_name], 4)
-                        elif field_type == FieldType.STRING:
-                            # get string position from lookup
-                            string_value = entry_data[field_name]
-                            old_string_pos = self.string_lookup[string_value]
-                            # update string pointer using string_position_map
-                            new_string_pos = string_position_map[old_string_pos]
-                            temp_binary.write_integer(new_string_pos, 4)
-                    # write previous pointer
-                    if prev_entry_pos == -1:
-                        temp_binary.write_integer(-1, 4)  # first entry
-                    else:
-                        temp_binary.write_integer(prev_entry_pos, 4)
-                    # write next pointer
-                    if i == len(entries) - 1:
-                        temp_binary.write_integer(-1, 4)  # last entry
-                    else:
-                        next_entry_pos = new_entry_buffer_offset + 20 + (i + 1) * entry_size
-                        temp_binary.write_integer(next_entry_pos, 4)
-                    prev_entry_pos = new_entry_pos
-                except Exception as e:
-                    raise IOError(f"Error writing entry {entry_id}: {e}")
-            # update first and last entry pointers in header
-            if len(entries) > 0:
-                temp_binary.goto(first_entry_pointer_pos)
-                temp_binary.write_integer(first_entry_pos, 4)
-                temp_binary.goto(last_entry_pointer_pos)
-                temp_binary.write_integer(last_entry_pos, 4)
-            # find the correct position for the header offsets
-            # we need to find where in the header these values are stored
+                    
+            print("\nCopying entries...")
+            # simply copy all entries to temp file from new entry buffer offset
+            self._copy_entries(binary_file, temp_binary, new_entry_buffer_offset, string_position_map)
+            
+            print("\nVerifying temp file header...")
             temp_binary.goto(0)
-            # skip magic constant (4 bytes)
-            temp_binary.goto(4)
-            # read number of fields
-            nfields = temp_binary.read_integer(4)
-            # skip field definitions
-            for _ in range(nfields):
-                field_type = temp_binary.read_integer(1)
-                field_name_len = temp_binary.read_integer(2)
-                temp_binary.goto(temp_binary.file.tell() + field_name_len)
-            # now we should be at the position of the string buffer offset
-            offset_pos = temp_binary.file.tell()
-            # update header offsets in temp file
-            temp_binary.goto(offset_pos)
-            temp_binary.write_integer(new_string_buffer_offset, 4)  # update string buffer offset
-            temp_binary.write_integer(new_first_available_position, 4)  # update first available position
-            temp_binary.write_integer(new_entry_buffer_offset, 4)  # update entry buffer offset
+            temp_header = self._parse_header(temp_binary)
+            print(f"Temp file header: {temp_header}")
+        
+        print("\nReplacing original file with temp file...")
         # replace original file with temp file
         binary_file.file.close()
         import os
         import shutil
         os.remove(f"{self.name}/{table_name}.table")
         shutil.move(temp_file_path, f"{self.name}/{table_name}.table")
+        
         # reopen the file
         f = open(f"{self.name}/{table_name}.table", "rb+")
         binary_file.__init__(f)        
+        
         # create a new header dictionary with the correct values
-        new_header = {
-            'string_buffer_offset': new_string_buffer_offset,
-            'string_buffer_first_available_position': new_first_available_position,
-            'entry_buffer_offset': new_entry_buffer_offset,
-            'signature': header['signature'],
-            'nfields': header['nfields'],
-            'magic_c': header['magic_c']
-        }
+        new_header = self._parse_header(binary_file)
+        print(f"Final header: {new_header}")
+        
         # rebuild string lookup with the correct header values
         self.string_lookup = {}
         self._build_string_lookup(binary_file, new_header)
+        
+        print("=== String Buffer Expansion Complete ===\n")
         return new_header, binary_file
+
+    def _copy_entries(self, binary_file: BinaryFile, temp_binary: BinaryFile, new_entry_buffer_offset: int, string_position_map: dict[int, int]) -> None:
+        """
+            Copies all entries from the original file to the temp file, updating string pointers.
+            
+            :param binary_file: Original binary file
+            :param temp_binary: Temporary binary file to write to
+            :param new_entry_buffer_offset: New offset where entries should start in temp file
+            :param string_position_map: Mapping of old string positions to new positions
+        """
+        # get entry header from original file
+        header = self._parse_header(binary_file)
+        entry_header = self._parse_entry_header(binary_file, header)
+        # write entry header to temp file
+        temp_binary.goto(new_entry_buffer_offset)
+        temp_binary.write_integer(entry_header['last_used_id'], 4)
+        temp_binary.write_integer(entry_header['nentries'], 4)
+        # calculate entry size: ID (4) + fields (4 each) + prev/next pointers (8)
+        entry_size = 4 + len(header['signature']) * 4 + 8
+        # initialize pointers for linked list
+        prev_entry_pos = -1
+        first_entry_pos = -1
+        last_entry_pos = -1
+        # copy each entry
+        current_pos = entry_header['first_entry_pointer']
+        while current_pos != -1:
+            # calculate new position for this entry
+            new_entry_pos = new_entry_buffer_offset + 20 + (entry_header['nentries'] * entry_size)
+            # update first/last entry positions
+            if first_entry_pos == -1:
+                first_entry_pos = new_entry_pos
+            last_entry_pos = new_entry_pos
+            # copy entry ID
+            binary_file.goto(current_pos)
+            entry_id = binary_file.read_integer(4)
+            temp_binary.goto(new_entry_pos)
+            temp_binary.write_integer(entry_id, 4)
+            # copy field values
+            for field_name, field_type in header['signature']:
+                if field_type == FieldType.INTEGER:
+                    value = binary_file.read_integer(4)
+                    temp_binary.write_integer(value, 4)
+                elif field_type == FieldType.STRING:
+                    old_string_pos = binary_file.read_integer(4)
+                    new_string_pos = string_position_map.get(old_string_pos, -1)
+                    temp_binary.write_integer(new_string_pos, 4)
+            # copy previous pointer
+            if prev_entry_pos == -1:
+                temp_binary.write_integer(-1, 4)  # first entry
+            else:
+                temp_binary.write_integer(prev_entry_pos, 4)
+            # copy next pointer
+            next_pos = binary_file.read_integer(4)
+            if next_pos == -1:
+                temp_binary.write_integer(-1, 4)  # last entry
+            else:
+                next_new_pos = new_entry_buffer_offset + 20 + ((entry_header['nentries'] + 1) * entry_size)
+                temp_binary.write_integer(next_new_pos, 4)
+            # update pointers
+            prev_entry_pos = new_entry_pos
+            current_pos = next_pos
+            entry_header['nentries'] += 1
+        
+        # update entry header pointers
+        temp_binary.goto(new_entry_buffer_offset + 8)  # skip last_used_id and nentries
+        temp_binary.write_integer(first_entry_pos, 4)  # first entry pointer
+        temp_binary.write_integer(last_entry_pos, 4)   # last entry pointer
+        temp_binary.write_integer(entry_header['reserved_pointer'], 4)  # reserved pointer
+
+    def _update_index(self, table_name: str, entry: Entry, entry_id: int) -> None:
+        """
+            Updates the index for the given table and entry.
+            :param table_name: name of the table
+            :param entry: entry to be added
+            :param entry_id: id of the entry
+        """ 
+        # get table signature
+        signature = self.tables[table_name]
+        # update index
+        self.indexes[table_name][entry_id] = entry
+        # update field-specific indexes
+        for field_name, value in entry.items():
+            if field_name not in self.indexes[table_name]:
+                self.indexes[table_name][field_name] = {}
+            if value not in self.indexes[table_name][field_name]:
+                self.indexes[table_name][field_name][value] = []
+            self.indexes[table_name][field_name][value].append(entry_id)
+
 
     # TABLE MANAGEMENT FUNCTIONS
     def list_tables(self) -> list[str]:
@@ -574,7 +576,7 @@ class Database:
         field_list = list(fields)
         self.tables[table_name] = field_list
         table_path = f"{self.name}/{table_name}.table"
-        # Ensure database directory exists
+        # check database directory exists
         # TODO; create directory at init ?
         if not os.path.exists(self.name):
             os.makedirs(self.name)
@@ -671,8 +673,17 @@ class Database:
                     binary_file.write_integer(entry[field_name], 4)
                 elif field_type == FieldType.STRING:
                     # add string to buffer and get its position
-                    string_position = self._add_string_to_buffer(binary_file, entry[field_name], table_name)
+                    string_position, header, binary_file = self._add_string_to_buffer(binary_file, entry[field_name], table_name)
                     binary_file.write_integer(string_position, 4)
+                    # refresh entry header parsing
+                    entry_header = self._parse_entry_header(binary_file, header)
+                    # Update new_position calculation with new header
+                    new_position = entry_header['last_entry_pointer']
+                    if new_position == -1:
+                        new_position = header['entry_buffer_offset'] + 20  # 20 bytes for entry header
+                    else:
+                        # if not empty add after the last one
+                        new_position = entry_header['last_entry_pointer'] + entry_size
             # write previous pointer
             if entry_header['nentries'] > 0:
                 # point to the previous last entry
@@ -704,20 +715,193 @@ class Database:
             # update last entry pointer
             binary_file.write_integer(new_position, 4)
             # update index if it exists
-            if table_name in self.indexes:
-                # create entry with ID
-                indexed_entry = entry.copy()
-                indexed_entry['id'] = new_id
-                # add to index
-                self.indexes[table_name][new_id] = indexed_entry
-                # add to field-specific indexes
-                for field_name, value in entry.items():
-                    if field_name not in self.indexes[table_name]:
-                        self.indexes[table_name][field_name] = {}
-                    if value not in self.indexes[table_name][field_name]:
-                        self.indexes[table_name][field_name][value] = []
-                    self.indexes[table_name][field_name][value].append(new_id)
+            self._update_index(table_name, entry, new_id)
 
+    # TODO: have a function handle opening/closing of file ?
+    # might help with keeping some tables open
+    def get_complete_table(self, table_name: str) -> list[Entry]:
+        """
+            Returns the complete table of the given name.
+            :param table_name: name of the table
+            :return: list of all entries in the table
+            :raises ValueError: if table name does not exist
+            :raises ValueError: if table is not registered
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        # consider adding a register table function
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} is not registered")
+        # open table file
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            if table_name not in self.indexes_built_tables:
+                self._build_table_index(binary_file, table_name)
+            # read entries
+            entries = []
+            for entry_id, entry_data in self.indexes[table_name].items():
+                if isinstance(entry_id, int):  # skip field-specific indexes
+                    entries.append((entry_id, entry_data))
+            # sort entries by ID to maintain original order
+            entries.sort(key=lambda x: x[0])
+            # return entries
+            return entries
+    
+    def get_entry(self, table_name: str, field_name: str, field_value: Field) -> Entry | None:
+        """
+            Returns the entry of the given name and field value.
+            :param table_name: name of the table
+            :param field_name: name of the field
+            :param field_value: value of the field
+            :return: entry
+            :raises ValueError: if table name does not exist
+            :raises ValueError: if table is not registered
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        # check if table is registered
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} is not registered")
+        # open table file
+        entry = None
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # build table index if not already built
+            if table_name not in self.indexes_built_tables:
+                self._build_table_index(binary_file, table_name)
+            # get entry ID from field-specific index
+            # TODO: get first occurence or last occurence ?
+            entry_id = self.indexes[table_name][field_name][field_value][0]
+            # get entry
+            entry = self.indexes[table_name][entry_id]
+        return entry
+
+    def get_entries(self, table_name: str, field_name: str, field_value: Field) -> list[Entry]:
+        """
+            Returns the entries of the given table and field name and field value.
+            :param table_name: name of the table
+            :param field_name: name of the field
+            :param field_value: value of the field
+            :return: list of entries
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        # check if table is registered
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} is not registered")
+        # open table file
+        entries = []
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # build table index if not already built
+            if table_name not in self.indexes_built_tables:
+                self._build_table_index(binary_file, table_name)
+            # get entry IDs from field-specific index
+            entry_ids = self.indexes[table_name][field_name][field_value]
+            # get entries
+            for entry_id in entry_ids:
+                entries.append(self.indexes[table_name][entry_id])
+        # return entries
+        return entries
+
+    def get_table_size(self, table_name: str) -> int:
+        """
+            Returns the size of the table of the given name.
+            :param table_name: name of the table
+            :return: size of the table
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        # check if table is registered
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} is not registered")
+        # open table file
+        table_size = 0
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # get table size
+            header = self._parse_header(binary_file)
+            entry_header = self._parse_entry_header(binary_file, header)
+            table_size = entry_header['nentries']
+        # return table size
+        return table_size
+    
+    def select_entry(self, table_name: str, fields: tuple[str], field_name: str, field_value: Field) -> Field | tuple[Field]:
+        """
+            Selects the fields of the entry of the given table where fieldname has fieldvalue.
+            :param table_name: name of the table
+            :param fields: fields to be selected
+            :param field_name: name of the field
+            :param field_value: value of the field
+            :return: entry
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table_name}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table_name} does not exist")
+        # check if table is registered
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} is not registered")
+        # select fields
+        selected_fields = []
+        # open table file
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # build table index if not already built
+            if table_name not in self.indexes_built_tables:
+                self._build_table_index(binary_file, table_name)
+            # get entry ID from field-specific index
+            # TODO: get first occurence or last occurence ? need a logic for this
+            entry_id = self.indexes[table_name][field_name][field_value][0]
+            # get entry
+            entry = self.indexes[table_name][entry_id]
+            # select fields
+            if len(fields) == 1:
+                selected_fields.append(entry[fields[0]])
+            else:
+                for field in fields:
+                    selected_fields.append(entry[field])
+        # return only value if one field is selected
+        return selected_fields if len(selected_fields) > 1 else selected_fields[0]
+
+    def select_entries(self, table: str, fields: tuple[str], field_name: str, field_value: Field) -> list[Field | tuple[Field]]:
+        """
+            Selects the fields of the entries of the given table where fieldname has fieldvalue.
+            :param table: name of the table
+            :param fields: fields to be selected
+            :param field_name: name of the field
+            :param field_value: value of the field
+            :return: list of entries
+        """
+        # check if table exists
+        table_path = f"{self.name}/{table}.table"
+        if not os.path.exists(table_path):
+            raise ValueError(f"Table {table} does not exist")
+        # check if table is registered
+        if table not in self.tables:
+            raise ValueError(f"Table {table} is not registered")
+        # select entries
+        selected_fields = []
+        with open(table_path, "rb+") as f:
+            binary_file = BinaryFile(f)
+            # build table index if not already built
+            if table not in self.indexes_built_tables:
+                self._build_table_index(binary_file, table)
+            # get entry IDs from field-specific index
+            entry_ids = self.indexes[table][field_name][field_value]
+            # get entries
+            for entry_id in entry_ids:
+                for field in fields:
+                    selected_fields.append(self.indexes[table][entry_id][field])
+        return selected_fields
 
 if __name__ == "__main__":
     db = Database('programme')
@@ -730,28 +914,50 @@ if __name__ == "__main__":
     )
     print("Created table:", db.list_tables())  # should show ['cours']
     
-    # Test data
-    test_data = [
-        {'MNEMONIQUE': 101, 'NOM': 'Programmation',
-         'COORDINATEUR': 'Thierry Massart', 'CREDITS': 10},
-        {'MNEMONIQUE': 102, 'NOM': 'Fonctionnement des ordinateurs',
-         'COORDINATEUR': 'Gilles Geeraerts', 'CREDITS': 5},
-        {'MNEMONIQUE': 103, 'NOM': 'Algorithmique I',
-         'COORDINATEUR': 'Olivier Markowitch', 'CREDITS': 10}
-    ]
+    db.add_entry('cours', {
+        'MNEMONIQUE': 101, 
+        'NOM': 'Progra',
+        'COORDINATEUR': 'T. Massart', 
+        'CREDITS': 10
+        }) # ajout de Progra
+    db.add_entry('cours', {
+        'MNEMONIQUE': 102, 
+        'NOM': 'FDO',
+        'COORDINATEUR': 'G. Geeraerts', 
+        'CREDITS': 5
+        }) # ajout de FDO
+    db.add_entry('cours', {
+        'MNEMONIQUE': 103, 
+        'NOM': 'Algo 1',
+        'COORDINATEUR': 'O. Markowitch', 
+        'CREDITS': 10
+        }) # ajout d'Algo 1
 
-    # Add entries
-    for entry in test_data:
-        db.add_entry('cours', entry)
-
-    # if db.indexes_built:
-        # print("Indexes built:", db.indexes)
-    # if db.string_lookup_built:
-        # print("String lookup built:", db.string_lookup)
+    print("\nTable size:", db.get_table_size('cours'))
     
-    # Removed cleanup to examine the file
-    print("\nDatabase file created and populated successfully.")
+    print("\n--- Index Structure ---")
+    print("Entry ID indexes:")
+    for key in db.indexes['cours'].keys():
+        if isinstance(key, int):
+            print(f"  Entry ID {key}: {db.indexes['cours'][key]}")
     
-    # Clean up
-    # db.delete_table('cours')
-    # print("\nCleaned up:", db.list_tables())  # should show []
+    print("\nField-specific indexes:")
+    for field_name, field_type in db.get_table_signature('cours'):
+        print(f"  Field '{field_name}':")
+        if field_name in db.indexes['cours']:
+            for value, entry_ids in db.indexes['cours'][field_name].items():
+                print(f"    Value '{value}' -> Entry IDs: {entry_ids}")
+        else:
+            print("    Not indexed")
+    
+    print("\n--- Query Results ---")
+    print("Complete table:", db.get_complete_table('cours'))
+    print("Entry with CREDITS=10:", db.get_entry('cours', 'CREDITS', 10))
+    print("Entries with CREDITS=10:", db.get_entries('cours', 'CREDITS', 10))
+    print("MNEMONIQUE values for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE',), 'CREDITS', 10))
+    print("(MNEMONIQUE, NOM) for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 10))
+    print("(NOM, MNEMONIQUE) for CREDITS=10:", db.select_entries('cours', ('NOM', 'MNEMONIQUE'), 'CREDITS', 10))
+    
+    # clean up
+    db.delete_table('cours')
+    print("\nCleaned up:", db.list_tables())  # should show []
