@@ -1,7 +1,7 @@
 from enum import IntEnum
 from binary import BinaryFile
 import os
-
+import shutil
 # field type enum
 class FieldType(IntEnum):
     INTEGER = 1
@@ -99,7 +99,8 @@ class Database:
         binary_file.write_integer(string_buffer_offset, 4)
         # entry buffer offset
         binary_file.write_integer(entry_buffer_offset, 4)
-        # return offsets
+        # return to start of file
+        # TODO: do we need to restore pointer to start of file?
         binary_file.goto(0)
         return string_buffer_offset, entry_buffer_offset
 
@@ -289,6 +290,8 @@ class Database:
         if string in self.string_lookup:
             return self.string_lookup[string]
         # current position in file
+        # TODO: since there is a good chance file will be expanded,
+        # we should not rely on current position
         current_pos = binary_file._get_current_pos()
         # header information
         binary_file.goto(0)
@@ -318,22 +321,24 @@ class Database:
         # find the correct position for the first available position in the header
         binary_file.goto(0)
         # skip magic constant (4 bytes)
-        binary_file.goto(4)
+        # binary_file.goto(4)
+        for _ in range(4):
+            binary_file.read_integer(1)
         # read number of fields
         nfields = binary_file.read_integer(4)
         # skip field definitions
         for _ in range(nfields):
             field_type = binary_file.read_integer(1)
             field_name_len = binary_file.read_integer(2)
-            binary_file.goto(binary_file._get_current_pos() + field_name_len)
+            binary_file.goto(binary_file._get_current_pos() + field_name_len) 
         # skip string buffer offset (4 bytes)
-        binary_file.goto(binary_file._get_current_pos() + 4)
+        binary_file.read_integer(4)
         # write first available position
         binary_file.write_integer(new_first_available_position, 4)
         # update string lookup
         self.string_lookup[string] = string_pos
-        # restore original position
-        binary_file.goto(current_pos)
+        # SILENCED tmp: restore original position
+        # binary_file.goto(current_pos)
         return string_pos, header, binary_file
 
     def _expand_string_buffer(self, binary_file: BinaryFile, header: dict, entry_header: dict, table_name: str) -> tuple[dict, BinaryFile]:
@@ -346,38 +351,27 @@ class Database:
             :param table_name: name of the table
             :return: updated header
         """
-        print("\n=== Starting String Buffer Expansion ===")
-        print(f"Original header: {header}")
-        
         # current and new size
         curr_size = header['string_buffer_first_available_position'] - header['string_buffer_offset']
         if curr_size <= 0:
             curr_size = 16
         # TODO: come up with a better way to do this
-        new_size = curr_size * 4 # arbitrary size (always a power of 2)
-        print(f"Current size: {curr_size}, New size: {new_size}")
-        
+        new_size = curr_size * 4 # arbitrary size (always a power of 2)        
         # build index if not built
         if table_name not in self.indexes_built_tables:
             self._build_table_index(binary_file, table_name)
-            
         # create temporary file
         temp_file_path = f"{self.name}/temp_{table_name}.table"
         new_string_buffer_offset = header['string_buffer_offset']
-        new_entry_buffer_offset = new_string_buffer_offset + new_size
-        print(f"New offsets - String buffer: {new_string_buffer_offset}, Entry buffer: {new_entry_buffer_offset}")
-        
+        new_entry_buffer_offset = new_string_buffer_offset + new_size        
         with open(temp_file_path, "wb+") as temp_f:
             temp_binary = BinaryFile(temp_f)
-            print("\nWriting header to temp file...")
             # write magic constant
-            self._write_header(temp_binary, self.tables[table_name], new_string_buffer_offset, new_entry_buffer_offset)
-            
-            print("\nInitializing buffers...")
+            new_string_buffer_offset, new_entry_buffer_offset = self._write_header(temp_binary, 
+                    self.tables[table_name], new_string_buffer_offset, new_entry_buffer_offset)
+            # initialize buffers
             self._initialize_string_buffer(temp_binary, new_string_buffer_offset, new_size)
             self._initialize_entry_buffer(temp_binary, new_entry_buffer_offset)
-            
-            print("\nCopying strings...")
             # map of old string positions to new positions
             string_position_map = {}
             current_pos = header['string_buffer_offset']
@@ -412,37 +406,20 @@ class Database:
                     new_pos += 2 + str_len
                 except Exception as e:
                     raise IOError(f"Error processing string at pos {current_pos}: {e}")
-                    
-            print("\nCopying entries...")
             # simply copy all entries to temp file from new entry buffer offset
             self._copy_entries(binary_file, temp_binary, new_entry_buffer_offset, string_position_map)
-            
-            print("\nVerifying temp file header...")
-            temp_binary.goto(0)
-            temp_header = self._parse_header(temp_binary)
-            print(f"Temp file header: {temp_header}")
-        
-        print("\nReplacing original file with temp file...")
         # replace original file with temp file
         binary_file.file.close()
-        import os
-        import shutil
         os.remove(f"{self.name}/{table_name}.table")
         shutil.move(temp_file_path, f"{self.name}/{table_name}.table")
-        
         # reopen the file
         f = open(f"{self.name}/{table_name}.table", "rb+")
-        binary_file.__init__(f)        
-        
+        binary_file.__init__(f)
         # create a new header dictionary with the correct values
         new_header = self._parse_header(binary_file)
-        print(f"Final header: {new_header}")
-        
         # rebuild string lookup with the correct header values
         self.string_lookup = {}
         self._build_string_lookup(binary_file, new_header)
-        
-        print("=== String Buffer Expansion Complete ===\n")
         return new_header, binary_file
 
     def _copy_entries(self, binary_file: BinaryFile, temp_binary: BinaryFile, new_entry_buffer_offset: int, string_position_map: dict[int, int]) -> None:
@@ -645,6 +622,11 @@ class Database:
         # open table file
         with open(f"{self.name}/{table_name}.table", "rb+") as f:
             binary_file = BinaryFile(f)
+            # check for new strings in entry and replace them with their string_buffer positions
+            for field_name, field_value in entry.items():
+                if isinstance(field_value, str):
+                    string_pos, header, binary_file = self._add_string_to_buffer(binary_file, field_value, table_name)
+                    entry[field_name] = string_pos
             # read header and entry header
             header = self._parse_header(binary_file)
             entry_header = self._parse_entry_header(binary_file, header)
@@ -669,21 +651,10 @@ class Database:
             binary_file.write_integer(new_id, 4)
             # write field values
             for field_name, field_type in signature:
+                # TODO: maybe no need to check type?
                 if field_type == FieldType.INTEGER:
                     binary_file.write_integer(entry[field_name], 4)
-                elif field_type == FieldType.STRING:
-                    # add string to buffer and get its position
-                    string_position, header, binary_file = self._add_string_to_buffer(binary_file, entry[field_name], table_name)
-                    binary_file.write_integer(string_position, 4)
-                    # refresh entry header parsing
-                    entry_header = self._parse_entry_header(binary_file, header)
-                    # Update new_position calculation with new header
-                    new_position = entry_header['last_entry_pointer']
-                    if new_position == -1:
-                        new_position = header['entry_buffer_offset'] + 20  # 20 bytes for entry header
-                    else:
-                        # if not empty add after the last one
-                        new_position = entry_header['last_entry_pointer'] + entry_size
+            
             # write previous pointer
             if entry_header['nentries'] > 0:
                 # point to the previous last entry
