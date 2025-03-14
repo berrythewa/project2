@@ -424,7 +424,8 @@ class Database:
 
     def _copy_entries(self, binary_file: BinaryFile, temp_binary: BinaryFile, new_entry_buffer_offset: int, string_position_map: dict[int, int]) -> None:
         """
-            Copies all entries from the original file to the temp file, updating string pointers.
+            Copies all entries from the original file to the temp file.
+            Also handles string pointers to new positions. Called after expanding the string buffer.
             
             :param binary_file: Original binary file
             :param temp_binary: Temporary binary file to write to
@@ -433,61 +434,108 @@ class Database:
         """
         # get entry header from original file
         header = self._parse_header(binary_file)
-        entry_header = self._parse_entry_header(binary_file, header)
-        # write entry header to temp file
+        entry_header = self._parse_entry_header(binary_file, header)        
+        # if no entries -> write the entry header and return
+        if entry_header['nentries'] == 0 or entry_header['first_entry_pointer'] == -1:
+            temp_binary.goto(new_entry_buffer_offset)
+            temp_binary.write_integer(entry_header['last_used_id'], 4)
+            temp_binary.write_integer(0, 4)  # no entries
+            temp_binary.write_integer(-1, 4)  # first entry pointer
+            temp_binary.write_integer(-1, 4)  # last entry pointer
+            temp_binary.write_integer(-1, 4)  # reserved pointer
+            return
+        # read all entries into memory
+        entries = []
+        entry_size = 4 + len(header['signature']) * 4 + 8  # ID + fields + prev/next pointers
+        # traverse all entries in original file
+        current_pos = entry_header['first_entry_pointer']
+        visited_positions = set()  # Keep track of positions we've already visited
+        max_entries = entry_header['nentries'] * 2  # Safety limit - should never need more than this
+        entry_count = 0
+        try:
+            while current_pos != -1 and current_pos not in visited_positions and entry_count < max_entries:
+                visited_positions.add(current_pos)
+                entry_count += 1
+                # check if position is valid
+                if current_pos < 0 or current_pos >= binary_file.get_size():
+                    print(f"Warning: Invalid entry position {current_pos}, breaking loop")
+                    break
+                # read entry data
+                entry_data = {}
+                entry_data['position'] = current_pos
+                # read entry id
+                binary_file.goto(current_pos)
+                entry_data['id'] = binary_file.read_integer(4)
+                # read field values
+                entry_data['fields'] = []
+                for field_name, field_type in header['signature']:
+                    if field_type == FieldType.INTEGER:
+                        value = binary_file.read_integer(4)
+                        entry_data['fields'].append((field_name, field_type, value))
+                    elif field_type == FieldType.STRING:
+                        old_string_pos = binary_file.read_integer(4)
+                        new_string_pos = string_position_map.get(old_string_pos, -1)
+                        entry_data['fields'].append((field_name, field_type, new_string_pos))
+                # read previous pointer
+                entry_data['prev_pointer'] = binary_file.read_integer(4)
+                # read next pointer
+                next_ptr = binary_file.read_integer(4)
+                entry_data['next_pointer'] = next_ptr
+                # add entry to list
+                entries.append(entry_data)
+                # move to next entry
+                current_pos = next_ptr
+        except Exception as e:
+            print(f"Error reading entries: {e}")
+            # continue with retrieved entries so far
+        # write the entry header to temp file
         temp_binary.goto(new_entry_buffer_offset)
         temp_binary.write_integer(entry_header['last_used_id'], 4)
-        temp_binary.write_integer(entry_header['nentries'], 4)
-        # calculate entry size: ID (4) + fields (4 each) + prev/next pointers (8)
-        entry_size = 4 + len(header['signature']) * 4 + 8
-        # initialize pointers for linked list
+        temp_binary.write_integer(len(entries), 4)  # number of entries we actually read
+        # calculate new positions for entries
+        first_entry_pos = new_entry_buffer_offset + 20  # 20 bytes for entry header
+        # write entries to temp file
         prev_entry_pos = -1
-        first_entry_pos = -1
-        last_entry_pos = -1
-        # copy each entry
-        current_pos = entry_header['first_entry_pointer']
-        while current_pos != -1:
-            # calculate new position for this entry
-            new_entry_pos = new_entry_buffer_offset + 20 + (entry_header['nentries'] * entry_size)
-            # update first/last entry positions
-            if first_entry_pos == -1:
-                first_entry_pos = new_entry_pos
-            last_entry_pos = new_entry_pos
-            # copy entry ID
-            binary_file.goto(current_pos)
-            entry_id = binary_file.read_integer(4)
+        for i, entry_data in enumerate(entries):
+            new_entry_pos = first_entry_pos + (i * entry_size)  
+            # ensure new position is reachable in temp_binary
+            temp_file_size = temp_binary.get_size()
+            if new_entry_pos >= temp_file_size:
+                # need to extend the temp file
+                temp_binary.goto(temp_file_size)
+                # write zeros to extend the file
+                fill_size = new_entry_pos - temp_file_size
+                for _ in range(fill_size):
+                    temp_binary.write_integer(0, 1)            
+            # write entry ID
             temp_binary.goto(new_entry_pos)
-            temp_binary.write_integer(entry_id, 4)
-            # copy field values
-            for field_name, field_type in header['signature']:
-                if field_type == FieldType.INTEGER:
-                    value = binary_file.read_integer(4)
-                    temp_binary.write_integer(value, 4)
-                elif field_type == FieldType.STRING:
-                    old_string_pos = binary_file.read_integer(4)
-                    new_string_pos = string_position_map.get(old_string_pos, -1)
-                    temp_binary.write_integer(new_string_pos, 4)
-            # copy previous pointer
-            if prev_entry_pos == -1:
+            temp_binary.write_integer(entry_data['id'], 4)
+            # write field values
+            for field_name, field_type, value in entry_data['fields']:
+                temp_binary.write_integer(value, 4)
+            # write previous pointer
+            if i == 0:
                 temp_binary.write_integer(-1, 4)  # first entry
             else:
                 temp_binary.write_integer(prev_entry_pos, 4)
-            # copy next pointer
-            next_pos = binary_file.read_integer(4)
-            if next_pos == -1:
+            # write next pointer
+            if i == len(entries) - 1:
                 temp_binary.write_integer(-1, 4)  # last entry
             else:
-                next_new_pos = new_entry_buffer_offset + 20 + ((entry_header['nentries'] + 1) * entry_size)
-                temp_binary.write_integer(next_new_pos, 4)
-            # update pointers
+                next_entry_pos = new_entry_pos + entry_size
+                temp_binary.write_integer(next_entry_pos, 4)
+            # update prev_entry_pos for next iteration
             prev_entry_pos = new_entry_pos
-            current_pos = next_pos
-            entry_header['nentries'] += 1
-        
         # update entry header pointers
         temp_binary.goto(new_entry_buffer_offset + 8)  # skip last_used_id and nentries
-        temp_binary.write_integer(first_entry_pos, 4)  # first entry pointer
-        temp_binary.write_integer(last_entry_pos, 4)   # last entry pointer
+        if len(entries) > 0:
+            temp_binary.write_integer(first_entry_pos, 4)  # first entry pointer
+            last_entry_pos = first_entry_pos + ((len(entries) - 1) * entry_size)
+            temp_binary.write_integer(last_entry_pos, 4)  # last entry pointer
+        else:
+            temp_binary.write_integer(-1, 4)  # first entry pointer
+            temp_binary.write_integer(-1, 4)  # last entry pointer
+        # write reserved pointer
         temp_binary.write_integer(entry_header['reserved_pointer'], 4)  # reserved pointer
 
     def _update_index(self, table_name: str, entry: Entry, entry_id: int) -> None:
@@ -499,6 +547,9 @@ class Database:
         """ 
         # get table signature
         signature = self.tables[table_name]
+        # build index if not already built
+        if table_name not in self.indexes_built_tables:
+            self._build_table_index(binary_file, table_name)
         # update index
         self.indexes[table_name][entry_id] = entry
         # update field-specific indexes
@@ -639,22 +690,30 @@ class Database:
             entry_size = 4 + len(signature) * 4 + 8
             # new entry position: add at the end for now
             # TODO: reuse of deleted entries - use reserved_pointer 
+            # calculate new_position
             new_position = entry_header['last_entry_pointer']
             if new_position == -1:
                 new_position = header['entry_buffer_offset'] + 20  # 20 bytes for entry header
             else:
                 # if not empty add after the last one
                 new_position = entry_header['last_entry_pointer'] + entry_size
-            # write new entry to file
+            # ensure new position is reachable
+            current_file_size = binary_file.get_size()
+            if new_position >= current_file_size:
+                # need to extend the file
+                binary_file.goto(current_file_size)
+                # write zeros to extend the file
+                fill_size = new_position - current_file_size
+                for _ in range(fill_size):
+                    binary_file.write_integer(0, 1)
+            # seek to new_position
             binary_file.goto(new_position)
             # write entry ID
             binary_file.write_integer(new_id, 4)
             # write field values
             for field_name, field_type in signature:
                 # TODO: maybe no need to check type?
-                if field_type == FieldType.INTEGER:
-                    binary_file.write_integer(entry[field_name], 4)
-            
+                binary_file.write_integer(entry[field_name], 4)
             # write previous pointer
             if entry_header['nentries'] > 0:
                 # point to the previous last entry
@@ -668,24 +727,25 @@ class Database:
             # if not empty update the previous last entry's next pointer
             if entry_header['nentries'] > 0:
                 # goto pos of next pointer in previous last entry
-                binary_file.goto(entry_header['last_entry_pointer'] + entry_size - 4)  
+                prev_next_ptr_pos = entry_header['last_entry_pointer'] + entry_size - 4
+                binary_file.goto(prev_next_ptr_pos)
                 binary_file.write_integer(new_position, 4)
-
             # update entry header
             binary_file.goto(header['entry_buffer_offset'])
             # update last used ID
             binary_file.write_integer(new_id, 4)
             # update number of entries
             binary_file.write_integer(entry_header['nentries'] + 1, 4)
-            # update first entry pointer if this is the first entry
+            # update first entry pointer if first entry
             if entry_header['nentries'] == 0:
                 binary_file.write_integer(new_position, 4)
             else:
-                # skip first entry pointer, keep it as is
-                binary_file.goto(header['entry_buffer_offset'] + 8)
+                # first entry pointer did not change
+                first_entry_ptr = entry_header['first_entry_pointer']
+                binary_file.write_integer(first_entry_ptr, 4)
             # update last entry pointer
             binary_file.write_integer(new_position, 4)
-            # update index if it exists
+            # update index
             self._update_index(table_name, entry, new_id)
 
     # TODO: have a function handle opening/closing of file ?
@@ -874,61 +934,61 @@ class Database:
                     selected_fields.append(self.indexes[table][entry_id][field])
         return selected_fields
 
-if __name__ == "__main__":
-    db = Database('programme')
-    db.create_table(
-        'cours',
-        ('MNEMONIQUE', FieldType.INTEGER),
-        ('NOM', FieldType.STRING),
-        ('COORDINATEUR', FieldType.STRING),
-        ('CREDITS', FieldType.INTEGER)
-    )
-    print("Created table:", db.list_tables())  # should show ['cours']
+# if __name__ == "__main__":
+#     db = Database('programme')
+#     db.create_table(
+#         'cours',
+#         ('MNEMONIQUE', FieldType.INTEGER),
+#         ('NOM', FieldType.STRING),
+#         ('COORDINATEUR', FieldType.STRING),
+#         ('CREDITS', FieldType.INTEGER)
+#     )
+#     print("Created table:", db.list_tables())  # should show ['cours']
     
-    db.add_entry('cours', {
-        'MNEMONIQUE': 101, 
-        'NOM': 'Progra',
-        'COORDINATEUR': 'T. Massart', 
-        'CREDITS': 10
-        }) # ajout de Progra
-    db.add_entry('cours', {
-        'MNEMONIQUE': 102, 
-        'NOM': 'FDO',
-        'COORDINATEUR': 'G. Geeraerts', 
-        'CREDITS': 5
-        }) # ajout de FDO
-    db.add_entry('cours', {
-        'MNEMONIQUE': 103, 
-        'NOM': 'Algo 1',
-        'COORDINATEUR': 'O. Markowitch', 
-        'CREDITS': 10
-        }) # ajout d'Algo 1
+#     db.add_entry('cours', {
+#         'MNEMONIQUE': 101, 
+#         'NOM': 'Progra',
+#         'COORDINATEUR': 'T. Massart', 
+#         'CREDITS': 10
+#         }) # ajout de Progra
+#     db.add_entry('cours', {
+#         'MNEMONIQUE': 102, 
+#         'NOM': 'FDO',
+#         'COORDINATEUR': 'G. Geeraerts', 
+#         'CREDITS': 5
+#         }) # ajout de FDO
+#     db.add_entry('cours', {
+#         'MNEMONIQUE': 103, 
+#         'NOM': 'Algo 1',
+#         'COORDINATEUR': 'O. Markowitch', 
+#         'CREDITS': 10
+#         }) # ajout d'Algo 1
 
-    print("\nTable size:", db.get_table_size('cours'))
+#     print("\nTable size:", db.get_table_size('cours'))
     
-    print("\n--- Index Structure ---")
-    print("Entry ID indexes:")
-    for key in db.indexes['cours'].keys():
-        if isinstance(key, int):
-            print(f"  Entry ID {key}: {db.indexes['cours'][key]}")
+#     print("\n--- Index Structure ---")
+#     print("Entry ID indexes:")
+#     for key in db.indexes['cours'].keys():
+#         if isinstance(key, int):
+#             print(f"  Entry ID {key}: {db.indexes['cours'][key]}")
     
-    print("\nField-specific indexes:")
-    for field_name, field_type in db.get_table_signature('cours'):
-        print(f"  Field '{field_name}':")
-        if field_name in db.indexes['cours']:
-            for value, entry_ids in db.indexes['cours'][field_name].items():
-                print(f"    Value '{value}' -> Entry IDs: {entry_ids}")
-        else:
-            print("    Not indexed")
+#     print("\nField-specific indexes:")
+#     for field_name, field_type in db.get_table_signature('cours'):
+#         print(f"  Field '{field_name}':")
+#         if field_name in db.indexes['cours']:
+#             for value, entry_ids in db.indexes['cours'][field_name].items():
+#                 print(f"    Value '{value}' -> Entry IDs: {entry_ids}")
+#         else:
+#             print("    Not indexed")
     
-    print("\n--- Query Results ---")
-    print("Complete table:", db.get_complete_table('cours'))
-    print("Entry with CREDITS=10:", db.get_entry('cours', 'CREDITS', 10))
-    print("Entries with CREDITS=10:", db.get_entries('cours', 'CREDITS', 10))
-    print("MNEMONIQUE values for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE',), 'CREDITS', 10))
-    print("(MNEMONIQUE, NOM) for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 10))
-    print("(NOM, MNEMONIQUE) for CREDITS=10:", db.select_entries('cours', ('NOM', 'MNEMONIQUE'), 'CREDITS', 10))
+#     print("\n--- Query Results ---")
+#     print("Complete table:", db.get_complete_table('cours'))
+#     print("Entry with CREDITS=10:", db.get_entry('cours', 'CREDITS', 10))
+#     print("Entries with CREDITS=10:", db.get_entries('cours', 'CREDITS', 10))
+#     print("MNEMONIQUE values for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE',), 'CREDITS', 10))
+#     print("(MNEMONIQUE, NOM) for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 10))
+#     print("(NOM, MNEMONIQUE) for CREDITS=10:", db.select_entries('cours', ('NOM', 'MNEMONIQUE'), 'CREDITS', 10))
     
-    # clean up
-    db.delete_table('cours')
-    print("\nCleaned up:", db.list_tables())  # should show []
+#     # clean up
+#     db.delete_table('cours')
+#     print("\nCleaned up:", db.list_tables())  # should show []
