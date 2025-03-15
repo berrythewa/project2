@@ -19,9 +19,12 @@ Entry = dict[str, Field]
 # type alias for table signature
 TableSignature = list[tuple[str, FieldType]]
 
-#TODO: add constants system for clearer code
-#TODO: review code, specially the expanding of the string buffers
-
+# TODO: add constants system for clearer code
+# TODO: have a function handle all opening/closing of file ?
+# TODO: might help with keeping some tables open
+# TODO: make helper function for get_entry and get_entries - a lot of code is repeated
+# TODO: rework creation flow maybe ?
+# TODO: get_complete_table could perhaps make use of get_entries
 # database class
 class Database:
     def __init__(self, name: str):
@@ -402,20 +405,13 @@ class Database:
         curr_size = header['string_buffer_first_available_position'] - header['string_buffer_offset']
         if curr_size <= 0:
             curr_size = 16
-        # TODO: come up with a better way to do this
         new_size = curr_size * EXPAND_FACTOR # arbitrary size (always a power of 2)
         # WARNING: For the test_insert_in_table case, stupid assumption is made
         # demands expansion to be strctly enough to contain the new string
         # and nothing else
+        # whereas me i want to expand more aggressively so we don't have to do this too often
         if new_string is not None:
             new_size = curr_size + len(new_string.encode('utf-8')) + 2
-        # debug stuff
-        print(f"\n[DEBUG EXPAND] Current string buffer size: {curr_size}, expanding to: {new_size}")
-        print(f"[DEBUG EXPAND] String buffer offset: {header['string_buffer_offset']}")
-        print(f"[DEBUG EXPAND] First available position: {header['string_buffer_first_available_position']}")
-        print(f"[DEBUG EXPAND] Entry buffer offset: {header['entry_buffer_offset']}")
-        print(f"[DEBUG EXPAND] Current string_lookup: {self.string_lookup}")
-        
         # build index if not built
         if table_name not in self.indexes_built_tables:
             self._build_table_index(binary_file, table_name)
@@ -423,10 +419,7 @@ class Database:
         temp_file_path = f"{self.name}/temp_{table_name}.table"
         new_string_buffer_offset = header['string_buffer_offset']
         new_entry_buffer_offset = new_string_buffer_offset + new_size
-        
-        print(f"[DEBUG EXPAND] New string buffer offset: {new_string_buffer_offset}")
-        print(f"[DEBUG EXPAND] New entry buffer offset: {new_entry_buffer_offset}")
-        
+        # write header
         with open(temp_file_path, "wb+") as temp_f:
             temp_binary = BinaryFile(temp_f)
             # write magic constant
@@ -444,42 +437,21 @@ class Database:
             string_position_map = {}
             current_pos = header['string_buffer_offset']
             new_pos = new_string_buffer_offset
-            
-            print(f"[DEBUG EXPAND] Starting string copy loop")
-            print(f"[DEBUG EXPAND] Initial current_pos: {current_pos}")
-            print(f"[DEBUG EXPAND] Initial new_pos: {new_pos}")
-            
             # traverse valid strings in original file
             while current_pos < header['string_buffer_first_available_position']:
                 try:
-                    print(f"\n[DEBUG EXPAND] Processing string at position: {current_pos}")
                     binary_file.goto(current_pos)
                     # read string length
                     str_len = binary_file.read_integer(2)
-                    print(f"[DEBUG EXPAND] String length: {str_len}")
-                    
                     # record mapping of old position to new position
                     string_position_map[current_pos] = new_pos
-                    print(f"[DEBUG EXPAND] Mapping old position {current_pos} to new position {new_pos}")
-                    
                     # copy string to new buffer
                     binary_file.goto(current_pos)
                     # read the string manually to avoid issues with read_string
                     temp_binary.goto(new_pos)
                     temp_binary.write_integer(str_len, 2)  # write length
-                    
-                    # Try to read the actual string for debugging
-                    binary_file.goto(current_pos)
-                    try:
-                        actual_string = binary_file.read_string()
-                        print(f"[DEBUG EXPAND] String content: '{actual_string}'")
-                    except Exception as e:
-                        print(f"[DEBUG EXPAND] Could not read string: {e}")
-                    
                     # copy the string bytes directly
-                    binary_file.goto(current_pos + 2)  # skip length bytes
-                    print(f"[DEBUG EXPAND] Copying {str_len} bytes from position {current_pos + 2} to {new_pos + 2}")
-                    
+                    binary_file.goto(current_pos + 2)  # skip length bytes                    
                     for i in range(str_len):
                         try:
                             byte_val = binary_file.read_integer(1)
@@ -491,20 +463,11 @@ class Database:
                             for j in range(i, str_len):
                                 temp_binary.write_integer(0, 1)
                             break
-                    
                     # update positions
                     current_pos += 2 + str_len  # 2 bytes for length + string bytes
                     new_pos += 2 + str_len
-                    print(f"[DEBUG EXPAND] Updated current_pos: {current_pos}")
-                    print(f"[DEBUG EXPAND] Updated new_pos: {new_pos}")
-                    
                 except Exception as e:
-                    print(f"[DEBUG EXPAND] Error processing string: {e}")
                     raise IOError(f"Error processing string at pos {current_pos}: {e}")
-            
-            print(f"\n[DEBUG EXPAND] String copy loop completed")
-            print(f"[DEBUG EXPAND] Final string_position_map: {string_position_map}")
-            
             # simply copy all entries to temp file from new entry buffer offset
             self._copy_entries(binary_file, temp_binary, new_entry_buffer_offset, string_position_map)
         
@@ -517,18 +480,9 @@ class Database:
         binary_file.__init__(f)
         # create a new header dictionary with the correct values
         new_header = self._parse_header(binary_file)
-        
-        print(f"[DEBUG EXPAND] New header after expansion:")
-        print(f"  - string_buffer_offset: {new_header['string_buffer_offset']}")
-        print(f"  - string_buffer_first_available_position: {new_header['string_buffer_first_available_position']}")
-        print(f"  - entry_buffer_offset: {new_header['entry_buffer_offset']}")
-        
         # rebuild string lookup with the correct header values
         self.string_lookup = {}
         self._build_string_lookup(binary_file, new_header)
-        
-        print(f"[DEBUG EXPAND] Updated string_lookup after expansion: {self.string_lookup}")
-        
         return new_header, binary_file
 
     def _copy_entries(self, binary_file: BinaryFile, temp_binary: BinaryFile, new_entry_buffer_offset: int, string_position_map: dict[int, int]) -> None:
@@ -669,7 +623,6 @@ class Database:
                 self.indexes[table_name][field_name][value] = []
             self.indexes[table_name][field_name][value].append(entry_id)
 
-
     # TABLE MANAGEMENT FUNCTIONS
     def list_tables(self) -> list[str]:
         """
@@ -797,7 +750,7 @@ class Database:
             self.indexes_built_tables.remove(table_name)
         # remove table from open_files
         # TODO: not yet implemented open_files, 
-        #still considering if we should keep some tables open
+        # still considering if we should keep some tables open
         # if table_name in self.open_files:
         #     self.open_files.pop(table_name)
 
@@ -902,8 +855,6 @@ class Database:
             # update index
             self._update_index(table_name, entry, new_id)
 
-    # TODO: have a function handle opening/closing of file ?
-    # might help with keeping some tables open
     def get_complete_table(self, table_name: str) -> list[Entry]:
         """
             Returns the complete table of the given name.
@@ -928,11 +879,11 @@ class Database:
             entries = []
             for entry_id, entry_data in self.indexes[table_name].items():
                 if isinstance(entry_id, int):  # skip field-specific indexes
-                    # Create a copy of the entry data and add the id field
+                    # copy entry data and add the id field
                     entry_with_id = entry_data.copy()
                     entry_with_id['id'] = entry_id
                     entries.append(entry_with_id)
-            # sort entries by ID to maintain original order
+            # sort entries by ID
             entries.sort(key=lambda x: x['id'])
             # return entries
             return entries
@@ -970,7 +921,6 @@ class Database:
             entry['id'] = entry_id
         return entry
 
-    #TODO: make helper function for this and get_entries
     def get_entries(self, table_name: str, field_name: str, field_value: Field) -> list[Entry]:
         """
             Returns the entries of the given table and field name and field value.
@@ -1007,6 +957,7 @@ class Database:
             :param table_name: name of the table
             :return: size of the table
         """
+        # TODO: using index could be faster
         # check if table exists
         table_path = f"{self.name}/{table_name}.table"
         if not os.path.exists(table_path):
@@ -1022,7 +973,6 @@ class Database:
             header = self._parse_header(binary_file)
             entry_header = self._parse_entry_header(binary_file, header)
             table_size = entry_header['nentries']
-        # return table size
         return table_size
     
     def select_entry(self, table_name: str, fields: tuple[str], field_name: str, field_value: Field) -> Field | tuple[Field]:
@@ -1106,62 +1056,3 @@ class Database:
                         selected_fields.append(entry[field])
                     results.append(tuple(selected_fields))
         return results
-
-# if __name__ == "__main__":
-#     db = Database('programme')
-#     db.create_table(
-#         'cours',
-#         ('MNEMONIQUE', FieldType.INTEGER),
-#         ('NOM', FieldType.STRING),
-#         ('COORDINATEUR', FieldType.STRING),
-#         ('CREDITS', FieldType.INTEGER)
-#     )
-#     print("Created table:", db.list_tables())  # should show ['cours']
-    
-#     db.add_entry('cours', {
-#         'MNEMONIQUE': 101, 
-#         'NOM': 'Progra',
-#         'COORDINATEUR': 'T. Massart', 
-#         'CREDITS': 10
-#         }) # ajout de Progra
-#     db.add_entry('cours', {
-#         'MNEMONIQUE': 102, 
-#         'NOM': 'FDO',
-#         'COORDINATEUR': 'G. Geeraerts', 
-#         'CREDITS': 5
-#         }) # ajout de FDO
-#     db.add_entry('cours', {
-#         'MNEMONIQUE': 103, 
-#         'NOM': 'Algo 1',
-#         'COORDINATEUR': 'O. Markowitch', 
-#         'CREDITS': 10
-#         }) # ajout d'Algo 1
-
-#     print("\nTable size:", db.get_table_size('cours'))
-    
-#     print("\n--- Index Structure ---")
-#     print("Entry ID indexes:")
-#     for key in db.indexes['cours'].keys():
-#         if isinstance(key, int):
-#             print(f"  Entry ID {key}: {db.indexes['cours'][key]}")
-    
-#     print("\nField-specific indexes:")
-#     for field_name, field_type in db.get_table_signature('cours'):
-#         print(f"  Field '{field_name}':")
-#         if field_name in db.indexes['cours']:
-#             for value, entry_ids in db.indexes['cours'][field_name].items():
-#                 print(f"    Value '{value}' -> Entry IDs: {entry_ids}")
-#         else:
-#             print("    Not indexed")
-    
-#     print("\n--- Query Results ---")
-#     print("Complete table:", db.get_complete_table('cours'))
-#     print("Entry with CREDITS=10:", db.get_entry('cours', 'CREDITS', 10))
-#     print("Entries with CREDITS=10:", db.get_entries('cours', 'CREDITS', 10))
-#     print("MNEMONIQUE values for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE',), 'CREDITS', 10))
-#     print("(MNEMONIQUE, NOM) for CREDITS=10:", db.select_entries('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 10))
-#     print("(NOM, MNEMONIQUE) for CREDITS=10:", db.select_entries('cours', ('NOM', 'MNEMONIQUE'), 'CREDITS', 10))
-    
-#     # clean up
-#     db.delete_table('cours')
-#     print("\nCleaned up:", db.list_tables())  # should show []
