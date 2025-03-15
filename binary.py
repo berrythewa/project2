@@ -1,3 +1,5 @@
+# Author: Waberi Daher
+# Matricule: 000353308
 import io
 from typing import BinaryIO
 

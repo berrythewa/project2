@@ -1,3 +1,5 @@
+# Author: Waberi Daher
+# Matricule: 000353308
 from enum import IntEnum
 from binary import BinaryFile
 import os

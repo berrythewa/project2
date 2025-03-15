@@ -169,6 +169,24 @@ def test_insert_in_table():
     }
     db.add_entry('cours', entry)
     data = _read_table_file(COURS_PATH)
+    
+    # Debug print
+    # print("\nActual binary data:")
+    # print(f"String buffer pos: {data[52:56].hex()}")
+    # print(f"Available string pos: {data[56:60].hex()}")
+    # print(f"Entry buffer pos: {data[60:64].hex()}")
+    # print(f"String buffer: {data[64:96].hex()}")
+    # print(f"Current id: {data[96:100].hex()}")
+    # print(f"Current size: {data[100:104].hex()}")
+    # print(f"First: {data[104:108].hex()}")
+    # print(f"Last: {data[108:112].hex()}")
+    # print(f"First deleted: {data[112:116].hex()}")
+    # print(f"ID: {data[116:120].hex()}")
+    # print(f"101: {data[120:124].hex()}")
+    # print(f"Programmation: {data[124:128].hex()}")
+    # print(f"T. Massart: {data[128:132].hex()}")
+    # print(f"10: {data[132:136].hex()}")
+    
     assert data[52:56] == b'\x40\x00\x00\x00'  # string buffer pos
     assert data[56:60] == b'\x60\x00\x00\x00'  # available string pos
     assert data[60:64] == b'\x60\x00\x00\x00'  # entry buffer pos
