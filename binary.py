@@ -34,6 +34,13 @@ class BinaryFile:
         :return: Current position in the file.
         """
         return self.file.tell()
+    
+    def _get_file_name(self) -> str:
+        """
+        Gets the name of the file.
+        :return: Name of the file.
+        """
+        return self.file.name
 
     def get_size(self) -> int:
         """
