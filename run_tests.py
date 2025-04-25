@@ -22,7 +22,7 @@ TESTS = [
     "test_field_types",
     "test_list_table",
     "test_create_table",
-    "test_create_table_alreay_exists",
+    "test_create_table_already_exists",
     "test_delete_non_existing_table",
     "test_get_signature_non_existing_table",
     "test_create_table_twice",

@@ -21,21 +21,21 @@ def get_programme_db() -> 'Database':
         ('MNEMONIQUE', FieldType.INTEGER),
         ('NOM', FieldType.STRING),
         ('COORDINATEUR', FieldType.STRING),
-        ('CREDITS', FieldType.INTEGER)
+        ('CREDITS', FieldType.INTEGER),
     )
     return db
 
 COURSES = [
-    {'MNEMONIQUE': 101, 'NOM': 'Programmation',
-     'COORDINATEUR': 'Thierry Massart', 'CREDITS': 10},
-    {'MNEMONIQUE': 102, 'NOM': 'Fonctionnement des ordinateurs',
-     'COORDINATEUR': 'Gilles Geeraerts', 'CREDITS': 5},
-    {'MNEMONIQUE': 103, 'NOM': 'Algorithmique I',
-     'COORDINATEUR': 'Olivier Markowitch', 'CREDITS': 10},
-    {'MNEMONIQUE': 105, 'NOM': 'Langages de programmation I',
-     'COORDINATEUR': 'Christophe Petit', 'CREDITS': 5},
-    {'MNEMONIQUE': 106, 'NOM': 'Projet d\'informatique I',
-     'COORDINATEUR': 'Gwenaël Joret', 'CREDITS': 5},
+    {'MNEMONIQUE': 201, 'NOM': 'Systèmes d\'exploitation',
+     'COORDINATEUR': 'Joël Goossens', 'CREDITS': 5},
+    {'MNEMONIQUE': 202, 'NOM': 'Langages de Programmation II',
+     'COORDINATEUR': 'John Iacono', 'CREDITS': 5},
+    {'MNEMONIQUE': 203, 'NOM': 'Algorithmique II',
+     'COORDINATEUR': 'Jean Cardinal', 'CREDITS': 5},
+    {'MNEMONIQUE': 204, 'NOM': 'Analyses et méthodes',
+     'COORDINATEUR': 'Christian Hernalsteen', 'CREDITS': 5},
+    {'MNEMONIQUE': 209, 'NOM': 'Projets d\'informatique II',
+     'COORDINATEUR': 'Joël Goossens', 'CREDITS': 10},
 ]
 
 def fill_courses(db: 'Database') -> None:
@@ -158,26 +158,26 @@ def test_delete_table():
 def test_insert_in_table():
     db = get_programme_db()
     entry = {
-        'MNEMONIQUE': 101, 'NOM': 'Programmation',
-        'COORDINATEUR': 'Thierry Massart', 'CREDITS': 10
+        'MNEMONIQUE': 203, 'NOM': 'Algorithmique 2',
+        'COORDINATEUR': 'Jean Cardinal', 'CREDITS': 5
     }
     db.add_entry('cours', entry)
     data = _read_table_file(COURS_PATH)
     assert data[52:56] == b'\x40\x00\x00\x00'  # string buffer pos
     assert data[56:60] == b'\x60\x00\x00\x00'  # available string pos
     assert data[60:64] == b'\x60\x00\x00\x00'  # entry buffer pos
-    assert data[64:96] == b'\x0d\x00Programmation' + \
-                          b'\x0f\x00Thierry Massart'
+    assert data[64:96] == b'\x0f\x00Algorithmique 2' + \
+                          b'\x0d\x00Jean Cardinal'
     assert data[96:100] == b'\x01\x00\x00\x00'  # current id
     assert data[100:104] == b'\x01\x00\x00\x00'  # current size
     assert data[104:108] == b'\x74\x00\x00\x00'  # first
     assert data[108:112] == b'\x74\x00\x00\x00'  # last
     assert data[112:116] == b'\xff\xff\xff\xff'  # first deleted
     assert data[116:120] == b'\x01\x00\x00\x00'  # ID
-    assert data[120:124] == b'\x65\x00\x00\x00'  # 101
-    assert data[124:128] == b'\x40\x00\x00\x00'  # Programmation
-    assert data[128:132] == b'\x4f\x00\x00\x00'  # T. Massart
-    assert data[132:136] == b'\x0a\x00\x00\x00'  # 10
+    assert data[120:124] == b'\xcb\x00\x00\x00'  # 203
+    assert data[124:128] == b'\x40\x00\x00\x00'  # Algorithmique 2
+    assert data[128:132] == b'\x51\x00\x00\x00'  # J. Cardinal
+    assert data[132:136] == b'\x05\x00\x00\x00'  # 5
 
 def test_get_table_signature():
     from database import FieldType
@@ -186,7 +186,7 @@ def test_get_table_signature():
         ('MNEMONIQUE', FieldType.INTEGER),
         ('NOM', FieldType.STRING),
         ('COORDINATEUR', FieldType.STRING),
-        ('CREDITS', FieldType.INTEGER)
+        ('CREDITS', FieldType.INTEGER),
     ]
     assert db.get_table_signature('cours') == signature
 
@@ -224,24 +224,25 @@ def test_size_after_insert():
 def test_get():
     db = get_programme_db()
     fill_courses(db)
-    entry = db.get_entry('cours', 'MNEMONIQUE', 101)
+    entry = db.get_entry('cours', 'MNEMONIQUE', 201)
     assert entry == COURSES[0] | {'id': 1}
-    entries = db.get_entries('cours', 'MNEMONIQUE', 101)
+    entries = db.get_entries('cours', 'MNEMONIQUE', 201)
     assert entries == [COURSES[0] | {'id': 1}]
-    entries = db.get_entries('cours', 'CREDITS', 10)
-    assert {entry['MNEMONIQUE'] for entry in entries} == {101, 103}
+    entries = db.get_entries('cours', 'CREDITS', 5)
+    assert {entry['MNEMONIQUE'] for entry in entries} == {201, 202, 203, 204}
 
 def test_select():
     db = get_programme_db()
     fill_courses(db)
-    query = db.select_entry('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 5)
+    query = db.select_entry('cours', ('MNEMONIQUE', 'COORDINATEUR'), 'CREDITS', 5)
     possibles = {
-        (102, 'Fonctionnement des ordinateurs'),
-        (105, 'Langages de programmation I'),
-        (106, 'Projet d\'informatique I')
+        (201, 'Joël Goossens'),
+        (202, 'John Iacono'),
+        (203, 'Jean Cardinal'),
+        (204, 'Christian Hernalsteen')
     }
     assert query in possibles
-    query = db.select_entries('cours', ('MNEMONIQUE', 'NOM'), 'CREDITS', 5)
+    query = db.select_entries('cours', ('MNEMONIQUE', 'COORDINATEUR'), 'CREDITS', 5)
     assert set(query) == possibles
 
 ########################################
@@ -267,10 +268,10 @@ def test_update_shorter_string():
     db.add_entry('cours', COURSES[1])
     db.update_entries(
         'cours',
-        'NOM', 'Fonctionnement des ordinateurs',
-        'NOM', 'FDO'
+        'NOM', 'Langages de Programmation II',
+        'NOM', 'LDP 2'
     )
-    assert db.select_entry('cours', ('NOM',), 'id', 1) == 'FDO'
+    assert db.select_entry('cours', ('NOM',), 'id', 1) == 'LDP 2'
 
 def test_update_longer_string():
     db = get_programme_db()
@@ -301,13 +302,14 @@ def test_update_wrong_type():
 def test_id_preserved_after_update():
     db = get_programme_db()
     fill_courses(db)
-    f103_id = db.select_entry('cours', ('id',), 'MNEMONIQUE', 103)
+    f209_id = db.select_entry('cours', ('id',), 'MNEMONIQUE', 209)
     db.update_entries('cours', 'CREDITS', 10, 'NOM', '')
-    assert db.select_entry('cours', ('id',), 'MNEMONIQUE', 103) == f103_id
+    assert db.select_entry('cours', ('id',), 'MNEMONIQUE', 209) == f209_id
 
 def test_delete_entries():
     db = get_programme_db()
     fill_courses(db)
+    print(db.get_complete_table('cours'))
     db.delete_entries('cours', 'CREDITS', 5)
     expected = [
         course | {'id': i+1}

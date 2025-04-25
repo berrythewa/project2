@@ -338,7 +338,7 @@ class Database:
         """        
         # if string already exists in the buffer
         if string in self.string_lookup:
-            return self.string_lookup[string]
+            return self.string_lookup[string], self._parse_header(binary_file), binary_file
         # current position in file
         # TODO: since there is a good chance file will be expanded,
         # we should not rely on current position
@@ -949,7 +949,10 @@ class Database:
             entry_ids = self.indexes[table_name][field_name][field_value]
             # get entries
             for entry_id in entry_ids:
-                entries.append(self.indexes[table_name][entry_id])
+                entry = self.indexes[table_name][entry_id].copy()
+                # Add the id field to the entry
+                entry['id'] = entry_id
+                entries.append(entry)
         # return entries
         return entries
 
