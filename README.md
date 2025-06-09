@@ -1,6 +1,4 @@
-Here’s a clean, professional, and ready-to-use `README.md` file that you can directly copy/paste into your GitHub repository. It is structured based on the PDF content you provided:
 
----
 
 # ULDB - Unique Layout for a DataBase
 
